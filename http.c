@@ -162,7 +162,7 @@ main(int argc, char** argv)
 	if (bind_port_str != NULL) {
 		char* end = NULL;
 		bind_port = strtol(bind_port_str, &end, 10);
-		if (end != NULL) {
+		if (*end != '\0') {
 			printf("Invalid port\n");
 			return 1;
 		}
@@ -183,7 +183,7 @@ main(int argc, char** argv)
 	struct sockaddr_in bind_addr = { 0 };
 	bind_addr.sin_family = AF_INET;
 	bind_addr.sin_port = htons(bind_port);
-	if (inet_pton(bind_addr.sin_family, bind_ipv4_addr, &bind_addr.sin_addr) < 0) {
+	if (inet_pton(bind_addr.sin_family, bind_ipv4_addr, &bind_addr.sin_addr) <= 0) {
 		fprintf(stderr, "Provided address is not a valid ipv4 address.\n");
 		close(serv_sockfd);
 		return 1;
