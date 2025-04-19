@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <time.h>
+#include <limits.h>
 
 #include <unistd.h>
 #include <sys/socket.h>
@@ -15,9 +16,12 @@
 #include <signal.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <sys/sendfile.h>
+#include <fcntl.h>
 
 #define MAX_CONNECTIONS 10
-#define DEFAULT_TIMEOUT 5
+#define DEFAULT_TIMEOUT 5 // TODO: rename?
 #define DEFAULT_MAX_REQUESTS 100
 #define MAX_BUFFER_CAPACITY 8 * 1024 * 100 // 100 kB per request
 #define MAX_HEADER_COUNT 100 // per request
@@ -58,7 +62,7 @@ sigint_handler(int _)
 void
 usage(const char* progname)
 {
-	fprintf(stderr, "httpc - the most basic http 1.1 server. Copyleft :3 Mikolaj Trafisz 2025.\n");
+	fprintf(stderr, "httpc - the most basic http 1.1 server. Copyleft Hatsune Miku 2025\n");
 	fprintf(stderr, "usage: %s <ipv4-address>[:port, default=8080] [directory, default='.']\n", progname);
 }
 
@@ -80,34 +84,6 @@ socket_set_timeout(int sockfd, uint16_t time_secs)
 	}
 
 	return true;
-}
-
-bool
-read_all(ClientContext* ctx)
-{
-	char tbuffer[512] = { 0 };
-	ssize_t n = -1;
-
-	while ((n = read(ctx->sockfd, tbuffer, sizeof(tbuffer))) >= 0) {
-		if (n + ctx->buffer_size >= ctx->buffer_capacity) {
-			if (ctx->buffer_size >= MAX_BUFFER_CAPACITY) {
-				fprintf(stderr, "Buffer size exceeded by the client.\n");
-				return false;
-			}
-			if (ctx->buffer_size == 0) ctx->buffer_capacity = 512;
-			else ctx->buffer_capacity *= 2;
-
-			ctx->buffer = realloc(ctx->buffer, ctx->buffer_capacity);
-			assert(ctx->buffer != NULL);
-		}
-		
-		memcpy(ctx->buffer+ctx->buffer_size, tbuffer, n);
-		ctx->buffer_size += n;
-
-		if (n < (ssize_t)sizeof(tbuffer)) return true;
-	}
-
-	return false;
 }
 
 ssize_t
@@ -152,7 +128,8 @@ read_request(ClientContext* ctx) {
 		memcpy(ctx->buffer+ctx->buffer_size, tbuffer, n);
 		ctx->buffer_size += n;
 
-		if (!read_headers) {
+		if (!read_headers) { // TODO: get rid of this shit? I don't think we'll
+							 // need the body, and we read the headers only to know how to receive it.
 			char* p = memmem(ctx->buffer, ctx->buffer_size, "\r\n\r\n", 4);
 			if (!p) continue;
 
@@ -164,7 +141,7 @@ read_request(ClientContext* ctx) {
 			head[ctx->buffer_size] = 0;
 
 			char* line = strtok(head, "\r\n");
-			line = strtok(NULL, "\r\n");	// we don't care about the first line :3
+			line = strtok(NULL, "\r\n");
 
 			while (line) {
 				char* cl = strcasestr(line, "content-length");
@@ -203,6 +180,59 @@ read_request(ClientContext* ctx) {
 	}
 
 	UNREACHABLE;
+}
+
+const char*
+get_extension(const char *path)
+{
+    const char *basename = strrchr(path, '/');
+    if (basename)
+        basename++;
+    else
+        basename = path;
+
+    const char *dot = strrchr(basename, '.');
+    if (!dot)
+        return NULL;
+
+    if (dot == basename)
+        return NULL;
+
+    return dot + 1;
+}
+
+
+const char*
+get_content_type(const char* path)
+{
+	const char* ext = get_extension(path);
+	if (!ext || *ext == 0) {
+		return "application/octet-stream";
+	}
+
+	if (strcasecmp(ext, "html") == 0 || strcasecmp(ext, "htm") == 0) {
+		return "text/html";
+	}
+	else if (strcasecmp(ext, "css") == 0) {
+		return "text/css";
+	}
+	else if (strcasecmp(ext, "js") == 0) {
+		return "application/javascript"; // EEWWWWWW
+	}
+	else if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) {
+		return "image/jpeg";
+	}
+	else if (strcasecmp(ext, "png") == 0) {
+		return "image/png";
+	}
+	else if (strcasecmp(ext, "gif") == 0) {
+		return "image/gif";
+	}
+	else if (strcasecmp(ext, "ico") == 0) {
+		return "image/vnd.microsoft.icon"; // MICROSOFT?! IN MY CODEBASE?!
+	}
+	// every other file type just doesn't exist (I'm delusional)
+	return "application/octet-stream";
 }
 
 void*
@@ -255,9 +285,32 @@ client_thread_handler(void* arg)
 		char* path = strtok(NULL, " ");
 		char* version = strtok(NULL, "\r\n");
 
+		if (!method || !path || !version) {
+			const char* err_400 =
+			"HTTP/1.1 400 Bad Request\r\n"
+			"\r\n";
+
+			write(ctx->sockfd, err_400, strlen(err_400));
+			
+			goto owari_da;
+		}
+
 		fprintf(stderr, "REQUEST (%u): [%s %s]\n", ctx->id, method, path);
 
-		if (!strcasestr(method, "GET")) {
+		if (strcasestr(version, "HTTP/1.1") == NULL) {
+			const char* err_505 =
+			"HTTP/1.1 505 HTTP version not supported\r\n"
+			"Content-Type: text/html\r\n"
+			"Content-Length: 71\r\n"
+			"\r\n"
+			"Request made in unsupported version of HTTP.<br>Supported versions: 1.1";
+
+			write(ctx->sockfd, err_505, strlen(err_505));
+
+			goto owari_da;
+		}
+
+		if (strcasestr(method, "GET") == NULL) {
 			const char* err_405 = 
 			"HTTP/1.1 405 Method Not Allowed\r\n"
 			"Content-Type: text/html\r\n"
@@ -267,61 +320,76 @@ client_thread_handler(void* arg)
 
 			write(ctx->sockfd, err_405, strlen(err_405));
 
-			if (keep_alive) continue;
-			break;
+			goto owari_da;
 		}
 
-		char* relpath = malloc(strlen(path) + 2);
-		sprintf(relpath, ".%s", path);
-		if (strstr(relpath, "..")) {
-			const char* err_403 =
-			"HTTP/1.1 403 Forbidden\r\n"
-			"Content-Type: text/html\r\n"
-			"Content-Length: 31\r\n"
-			"\r\n"
-			"Only absolute path is supported";
+		char temp[PATH_MAX] = { 0 };
+		strcat(temp, serv_directory);
+		strcat(temp, path);
+		char rpath[PATH_MAX] = { 0 };
 
-			write(ctx->sockfd, err_403, strlen(err_403));
+		const char* err_404 =
+		"HTTP/1.1 404 Not Found\r\n"
+		"Content-Type: text/html\r\n"
+		"Content-Length: 14\r\n"
+		"\r\n"
+		"File not found";
 
-			if (keep_alive) continue;
-			break;
-		}
-
-		FILE* fp = fopen(relpath, "rb");
-		if (fp == NULL) {
-			const char* err_404 =
-			"HTTP/1.1 404 Not Found\r\n"
-			"Content-Type: text/html\r\n"
-			"Content-Length: 14\r\n"
-			"\r\n"
-			"File not found";
-
+		if (!realpath(temp, rpath)) {
 			write(ctx->sockfd, err_404, strlen(err_404));
 			
-			if (keep_alive) continue;
-			break;
+			goto owari_da;
 		}
 
-		
-
-		// TODO: try to open specified file
-		// TODO: error 404 if not successfull
-		// TODO: send file if successfull
-		// TODO: path sanitation
-		// TODO: autoindexing
-
-		const char* dumb_reply =
-		"HTTP/1.1 200 OK\r\n"
+		const char* err_403 =
+		"HTTP/1.1 403 Forbidden\r\n"
 		"Content-Type: text/html\r\n"
-		"Keep-Alive: timeout=5, max=100\r\n"
-		"Content-Length: 35\r\n"
+		"Content-Length: 13\r\n"
 		"\r\n"
-		"<h1>I'm going to touch you >:3</h1>";
+		"Access Denied";
 
-		write(ctx->sockfd, dumb_reply, strlen(dumb_reply));
-		
+		struct stat st = { 0 };
+		if (stat(rpath, &st) < 0) {
+			write(ctx->sockfd, err_403, strlen(err_403));
+						
+			goto owari_da;
+		}
+
+		if (S_ISDIR(st.st_mode)) {
+			// TODO: autoindexing ?
+			write(ctx->sockfd, err_403, strlen(err_403));
+		} else if (S_ISREG(st.st_mode)) {
+			int filefd = open(rpath, O_RDONLY);
+
+			const char* content_type = get_content_type(rpath);
+
+			write(ctx->sockfd, "HTTP/1.1 200 OK\r\n", 17);
+
+			if (keep_alive) {
+				write(ctx->sockfd, "Keep-Alive: timeout=5, max=100\r\n", 32);
+				// TODO: write actual defined parameters
+			}
+
+			write(ctx->sockfd, "Content-Length: ", 16);
+			char len_str[32] = { 0 };
+			sprintf(len_str, "%lu\r\n", st.st_size);
+			write(ctx->sockfd, len_str, strlen(len_str));
+
+			write(ctx->sockfd, "Content-Type: ", 14);
+			write(ctx->sockfd, content_type, strlen(content_type));
+			write(ctx->sockfd, "\r\n", 2);
+
+			write(ctx->sockfd, "\r\n", 2);
+
+			sendfile(ctx->sockfd, filefd, NULL, st.st_size); // I'm in love in Linus Torvalds
+
+			close(filefd);
+		} else {
+			write(ctx->sockfd, err_403, strlen(err_403));
+		}
+
+		owari_da:
 		ctx->buffer_size = 0;
-
 		if (!keep_alive) break;
 	}
 
@@ -375,9 +443,18 @@ main(int argc, char** argv)
 		return 1;
 	}
 
-	if (!socket_set_timeout(serv_sockfd, DEFAULT_TIMEOUT)) {
-		perror("socket_set_timeout()");
-		return 1;
+	struct timeval timeout = {0};
+	timeout.tv_sec = DEFAULT_TIMEOUT;
+	timeout.tv_usec = 0;
+
+	if (setsockopt(serv_sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+		perror("setsockopt(SO_RECVTIMEO)");
+		return false;
+	}
+
+	if (setsockopt(serv_sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+		perror("setsockopt(SO_SNDTIMEO)");
+		return false;
 	}
 
 	if (bind(serv_sockfd, (struct sockaddr*)&bind_addr, sizeof bind_addr) < 0) {
