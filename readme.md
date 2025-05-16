@@ -33,4 +33,4 @@ Or whatever - I couldn't be bothered to complicate the build system to make it s
 
 `party.gif` I've found [here](https://tenor.com/view/teto-fruits-teto-food-teto-foods-kasane-teto-teto-gif-12782683999665099064). I do not own that image.
 
-Other than that, do whatever (see [LICENSE](UNLICENSE)).
+Other than that, do whatever (see [LICENSE](LICENSE)).
