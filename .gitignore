@@ -1,0 +1,4 @@
+httpc
+*.o
+.vscode
+config.h

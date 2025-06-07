@@ -1,0 +1,8 @@
+#ifndef _HTTPC_CONFIG_H
+#define _HTTPC_CONFIG_H
+
+#define HTTPC_DEFAULT_PORT 6969
+#define MAX_EVENTS 512
+#define EVENT_TABLE_SIZE (1<<13)
+
+#endif
