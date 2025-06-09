@@ -36,7 +36,6 @@
     }
 #define FALSE (0)
 #define TRUE (1)
-typedef unsigned int uint;
 
 typedef void (*event_callback_t)(int fd, uint32_t events, void* user_data);
 
@@ -61,7 +60,7 @@ static int serv_sockfd;
 EventManager em;
 
 int
-em_init(EventManager* em, uint max_events)
+em_init(EventManager* em, u_int max_events)
 {
     assert(em != NULL);
 
@@ -135,16 +134,17 @@ int
 em_modify_event(EventManager* em, int fd, uint32_t events)
 {
     assert(em != NULL && fd > 0);
-    
+
     int idx = hmgeti(em->events, fd);
-    if (idx < 0) return -1;
-    
+    if (idx < 0)
+        return -1;
+
     struct epoll_event ev = { .events = events, .data.fd = fd };
     if (epoll_ctl(em->epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
         perror("epoll_ctl(MOD) failed");
         return -1;
     }
-    
+
     em->events[idx].value.events = events;
     return 0;
 }
@@ -284,42 +284,80 @@ set_sock_blocking(int fd, int blocking)
     return 0;
 }
 
-void
-client_disconnect(int fd)
-{
-    assert(fd >= 0);
+typedef struct {
+    int fd;
+    u_char* in_buffer;
+    // Todo: out buffer + out_fd for sendfile() call?
 
-    em_remove_events(&em, fd);
-    close(fd);
+    enum {
+        STATE_RECV_HTTP_HEADER,
+        STATE_RECV_HEADERS,
+        STATE_RECV_BODY,
+        STATE_SEND,
+    } state;
+
+    enum {
+        BODY_SIZED,
+        BODY_CHUNKED,
+    } body_size_info;
+} Client;
+
+void
+client_disconnect(Client* c)
+{
+    assert(c != NULL);
+    assert(c->fd >= 0);
+
+    em_remove_events(&em, c->fd);
+    close(c->fd);
+    c->fd = -1;
+
+    arrfree(c->in_buffer);
+    c->in_buffer = NULL;
 }
 
 void
 client_data_cb(int fd, uint32_t events, void* data)
 {
     UNUSED(data);
+    Client* c = data;
 
     if (events & EPOLLRDHUP) {
         log_infof("client %u disconnected", fd);
-        client_disconnect(fd);
+        client_disconnect(c);
         return;
     }
 
-    char buffer[1024];
-    ssize_t n = recv(fd, buffer, sizeof(buffer), 0);
+    char tbuf[512];
+    ssize_t n = read(c->fd, tbuf, sizeof(tbuf));
     if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) 
+        if (errno == EWOULDBLOCK || errno == EAGAIN)
             return;
-        perror("recv() failed");
-        client_disconnect(fd);
+        perror("read() failed");
         return;
     }
     if (n == 0) {
         log_infof("client %u disconnected", fd);
-        client_disconnect(fd);
+        client_disconnect(c);
         return;
     }
 
-    send(fd, buffer, n, 0);
+    u_char* n_buff = arraddnptr(c->in_buffer, n);
+    strncpy((char*)n_buff, tbuf, n);
+
+    // TODO: stop condition depends on state - check here (switch or something)
+
+    if (!strstr((char*)c->in_buffer, "\r\n"))
+        return; // TODO: check for max lenght or smth
+
+    // TODO: parse the "part" according to state :3
+
+    log_infof("recived %lu bytes:\n%.*s",
+              arrlenu(c->in_buffer),
+              (int)(arrlenu(c->in_buffer) - 2),
+              c->in_buffer);
+
+    arrdeln(c->in_buffer, 0, n);
 
     return;
 }
@@ -327,6 +365,8 @@ client_data_cb(int fd, uint32_t events, void* data)
 void
 serv_accept_cb(int fd, uint32_t events, void* data)
 {
+    UNUSED(data);
+
     if (events & EPOLLRDHUP) {
         em_remove_events(&em, fd);
         return;
@@ -352,9 +392,16 @@ serv_accept_cb(int fd, uint32_t events, void* data)
         return;
     }
 
-    log_infof("client %u connected", fd);
+    Client* c = malloc(sizeof(Client));
+    assert(c != NULL);
 
-    if (em_add_event(&em, client_sockfd, READ_EVENTS, client_data_cb, data) < 0)
+    c->fd = client_sockfd;
+    c->in_buffer = NULL;
+    c->state = STATE_RECV_HTTP_HEADER;
+
+    log_infof("client %d connected", c->fd);
+
+    if (em_add_event(&em, client_sockfd, READ_EVENTS, client_data_cb, c) < 0)
         return;
 }
 
@@ -364,7 +411,7 @@ main(void)
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // TODO: read port from user
+    // TODO: read port from args
     int port = HTTPC_DEFAULT_PORT;
 
     serv_sockfd = create_server_socket(port);
